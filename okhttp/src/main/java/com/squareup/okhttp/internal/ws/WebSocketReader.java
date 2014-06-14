@@ -51,9 +51,15 @@ import static java.lang.Integer.toHexString;
  * An <a href="http://tools.ietf.org/html/rfc6455">RFC 6455</a>-compatible WebSocket frame reader.
  */
 public final class WebSocketReader {
+  public interface FrameCallback {
+    void onPing(Buffer buffer);
+    void onClose(Buffer buffer) throws IOException;
+  }
+
   private final boolean isClient;
   private final BufferedSource source;
   private final WebSocketListener listener;
+  private final FrameCallback frameCallback;
 
   private final Source framedMessageSource = new FramedMessageSource();
 
@@ -71,10 +77,15 @@ public final class WebSocketReader {
   private final byte[] maskKey = new byte[4];
   private final byte[] maskBuffer = new byte[2048];
 
-  public WebSocketReader(boolean isClient, BufferedSource source, WebSocketListener listener) {
+  public WebSocketReader(boolean isClient, BufferedSource source, WebSocketListener listener,
+      FrameCallback frameCallback) {
+    if (source == null) throw new NullPointerException("source");
+    if (listener == null) throw new NullPointerException("listener");
+    if (frameCallback == null) throw new NullPointerException("frameCallback");
     this.isClient = isClient;
     this.source = source;
     this.listener = listener;
+    this.frameCallback = frameCallback;
   }
 
   /**
@@ -83,6 +94,7 @@ public final class WebSocketReader {
    */
   public void readMessage() throws IOException {
     readUntilNonControlFrame();
+    if (closed) return;
 
     PayloadType type;
     switch (opcode) {
@@ -105,7 +117,7 @@ public final class WebSocketReader {
 
   /** Read headers and process any control frames until we reach a non-control frame. */
   private void readUntilNonControlFrame() throws IOException {
-    while (true) {
+    while (!closed) {
       readHeader();
       if (!isControlFrame) {
         break;
@@ -184,13 +196,24 @@ public final class WebSocketReader {
 
     switch (opcode) {
       case OPCODE_CONTROL_PING:
-        break; // TODO enqueue a pong with the read buffer.
+        frameCallback.onPing(buffer);
+        break;
       case OPCODE_CONTROL_PONG:
-        // Thanks for the pong! Nothing to do here.
+        // Thanks for the pong!
         break;
       case OPCODE_CONTROL_CLOSE:
-        // TODO if we did not initiate the close, enqueue an ack close on the writer.
+        frameCallback.onClose(buffer);
         closed = true;
+
+        int code = 0;
+        String reason = null;
+        if (buffer != null) {
+          code = buffer.readShort();
+          if (buffer.size() > 0) {
+            reason = buffer.readUtf8();
+          }
+        }
+        listener.onClose(code, reason);
         break;
       default:
         throw new IllegalStateException("Unknown control opcode: " + toHexString(opcode));
